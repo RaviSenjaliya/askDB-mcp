@@ -13,7 +13,8 @@
     "doctor": "node scripts/doctor.js",
     "smoke": "node scripts/smoke.js",
     "start:http": "node src/http.js",
-    "smoke:http": "node scripts/smoke-http.js"
+    "smoke:http": "node scripts/smoke-http.js",
+    "dev:netlify": "netlify dev"
   },
   "engines": {
     "node": ">=18"

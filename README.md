@@ -83,17 +83,19 @@ ChatGPT connectors cannot spawn a local process — they only speak **remote MCP
 MCP_AUTH_TOKEN=some-long-random-string npm run start:http
 ```
 
-Then point the connector at `https://<your-host>/mcp` with an `Authorization: Bearer <token>` header. For a quick trial, tunnel it (`cloudflared tunnel --url http://localhost:3000`); for anything lasting, host it properly — [DEPLOY.md](DEPLOY.md) covers Render end to end. `GET /health` is unauthenticated for load-balancer checks; `/mcp` requires the bearer token whenever `MCP_AUTH_TOKEN` is set.
+Then point the connector at `https://<your-host>/mcp` with an `Authorization: Bearer <token>` header. For a quick trial, tunnel it (`cloudflared tunnel --url http://localhost:3000`); for anything lasting, host it properly — [DEPLOY.md](DEPLOY.md) covers Netlify end to end. `GET /health` is unauthenticated for load-balancer checks; `/mcp` requires the bearer token whenever `MCP_AUTH_TOKEN` is set.
 
 The HTTP transport is stateless — one server instance per request — so it scales behind a load balancer without sticky sessions.
 
 ## Hosting
 
-[render.yaml](render.yaml) is a ready blueprint: Render Dashboard → New → Blueprint → pick this repo, paste `PINECONE_API_KEY`, done. It generates the bearer token for you and health-checks `/health`. Step-by-step, including the free-plan cold-start trap and how to rotate the token: **[DEPLOY.md](DEPLOY.md)**.
+Deployed as two Netlify Functions — [netlify.toml](netlify.toml) carries the build settings, so importing the repo and setting `PINECONE_API_KEY` + `MCP_AUTH_TOKEN` is the whole job. Step-by-step: **[DEPLOY.md](DEPLOY.md)**.
+
+This works without a transport rewrite because the MCP SDK's `WebStandardStreamableHTTPServerTransport` takes a `Request` and returns a `Response` — the Netlify Functions v2 signature — so [netlify/functions/mcp.mjs](netlify/functions/mcp.mjs) imports [src/mcp.js](src/mcp.js) unchanged. The same file drops onto Cloudflare Workers, Deno or Bun; [src/http.js](src/http.js) covers containers and VMs.
+
+`GET /health` needs no token and reports whether the required env vars landed (presence only, never values) — the serverless stand-in for reading a startup log. `/mcp` **fails closed**: with no `MCP_AUTH_TOKEN` set it returns 503 rather than serving your schema to the internet.
 
 Once it's up, teammates need nothing installed — just the URL and a token ([SETUP.md](SETUP.md), Route A).
-
-`GET /health` needs no token and returns `{status, index, uptimeSeconds}` — it's both the load-balancer probe and the wake-up ping for hosts that sleep idle instances. [.github/workflows/keep-alive.yml](.github/workflows/keep-alive.yml) hits it every 10 minutes once you set the `RENDER_HEALTH_URL` repo variable.
 
 ## Configuration
 
@@ -131,7 +133,6 @@ The server auto-detects which metadata fields your records use and whether the i
 | [src/http.js](src/http.js)             | Streamable HTTP entry point                             |
 | [src/config.js](src/config.js)         | Env loading and defaults                                |
 | [scripts/doctor.js](scripts/doctor.js) | Connectivity and retrieval diagnostics                  |
-| [render.yaml](render.yaml)             | Render blueprint for the hosted HTTP instance           |
+| [netlify/functions/](netlify/functions/) | Serverless entry points — `/mcp` and `/health`        |
+| [netlify.toml](netlify.toml)           | Netlify build and routing config                        |
 | [DEPLOY.md](DEPLOY.md)                 | Hosting guide                                           |
-#   a s k D B - m c p  
- 

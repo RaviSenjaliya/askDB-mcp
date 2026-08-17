@@ -1,0 +1,25 @@
+# Netlify configuration — https://docs.netlify.com/build/functions/configuration/
+#
+# askDB is not a website; it is two functions. `publish` still has to point
+# somewhere, and pointing it at the repo root would serve src/, README and the
+# rest of the tree as a public static site — hence the near-empty public/ dir.
+#
+# Routing comes from the `config.path` export in each function, so no redirects
+# are needed: /mcp -> netlify/functions/mcp.mjs, /health -> health.mjs
+
+[build]
+  command = "npm install"
+  publish = "public"
+  functions = "netlify/functions"
+
+[functions]
+  # esbuild follows the imports into src/, so the server code is bundled from
+  # one source of truth rather than duplicated into the functions directory.
+  node_bundler = "esbuild"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "no-referrer"
