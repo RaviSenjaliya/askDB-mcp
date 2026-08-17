@@ -1,0 +1,34 @@
+{
+  "name": "askdb-mcp",
+  "version": "1.0.0",
+  "description": "MCP server that retrieves database schema context from Pinecone so an LLM can write SQL",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "askdb-mcp": "src/server.js"
+  },
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "start": "node src/server.js",
+    "doctor": "node scripts/doctor.js",
+    "smoke": "node scripts/smoke.js",
+    "start:http": "node src/http.js",
+    "smoke:http": "node scripts/smoke-http.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "text-to-sql",
+    "pinecone",
+    "rag"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@pinecone-database/pinecone": "^8.2.0",
+    "dotenv": "^17.4.2",
+    "zod": "^4.4.3"
+  }
+}
