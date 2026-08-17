@@ -141,4 +141,4 @@ git push -u origin main
 
 `.gitignore` already excludes `.env` and `node_modules`, so no secrets are committed — worth confirming with `git status` before the first push.
 
-To host Route A, run `MCP_AUTH_TOKEN=<long-random-string> npm run start:http` behind TLS and issue each person their own token. Anyone with the URL and a valid token can read your entire schema, so don't skip the token.
+To host Route A, deploy the HTTP transport behind TLS with `MCP_AUTH_TOKEN` set — **[DEPLOY.md](DEPLOY.md)** walks through Render with the blueprint in [render.yaml](render.yaml), and the last section covers any other host. Anyone with the URL and a valid token can read your entire schema, so don't skip the token.

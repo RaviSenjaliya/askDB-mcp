@@ -45,8 +45,16 @@ const readBody = (req) =>
 const httpServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
 
+  // Unauthenticated on purpose: load balancers and keep-alive pingers hit this,
+  // and a request here is what wakes a sleeping instance. Reveals no secrets.
   if (url.pathname === '/health') {
-    return json(res, 200, { status: 'ok', index: config.indexName });
+    return json(res, 200, {
+      status: 'ok',
+      index: config.indexName,
+      // The field that tells you whether keep-alive is working: if uptime keeps
+      // resetting to near-zero, the host is sleeping between pings.
+      uptimeSeconds: Math.round(process.uptime()),
+    });
   }
 
   if (url.pathname !== endpoint) {
