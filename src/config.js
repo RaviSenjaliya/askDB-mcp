@@ -2,13 +2,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 
-// MCP clients launch the server with an arbitrary cwd, so load .env from the
-// package root instead of relying on process.cwd().
-const here = path.dirname(fileURLToPath(import.meta.url));
-export const packageRoot = path.resolve(here, '..');
+const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const envPath = path.join(packageRoot, '.env');
 
+// Locally, MCP clients launch the server with an arbitrary cwd, so .env is read
+// from the package root rather than process.cwd(). On Vercel there is no .env
+// file — the values come from the project's environment variables.
 // quiet: dotenv writes its banner to stdout, which is the MCP wire protocol.
-dotenv.config({ path: path.join(packageRoot, '.env'), quiet: true });
+if (!process.env.VERCEL) {
+  dotenv.config({ path: envPath, quiet: true });
+}
 
 const int = (value, fallback) => {
   const parsed = Number.parseInt(value ?? '', 10);
@@ -37,14 +40,8 @@ export const config = {
    * the model the schema was upserted with, or every score is noise.
    */
   embedModel: process.env.EMBED_MODEL || 'multilingual-e5-large',
-  /** Set to e.g. bge-reranker-v2-m3 to rerank hits; empty disables reranking. */
-  rerankModel: process.env.RERANK_MODEL || '',
-  /** With reranking on, retrieve topK × this, then rerank down to topK. */
-  rerankOverfetch: int(process.env.RERANK_OVERFETCH, 4),
-  /** Per-document cap sent to the reranker, so long DDL does not bloat the request. */
-  rerankMaxChars: int(process.env.RERANK_MAX_CHARS, 4000),
 
-  /** Metadata/record fields that may hold the schema text, most specific first. */
+  /** Metadata fields that may hold the schema text, most specific first. */
   textFields: list(process.env.TEXT_FIELDS, [
     'chunk_text',
     'text',
@@ -56,16 +53,10 @@ export const config = {
     'description',
   ]),
 
-  /** Metadata/record fields that may hold the table name. */
-  tableFields: list(process.env.TABLE_FIELDS, [
-    'table',
-    'table_name',
-    'tableName',
-    'entity',
-    'name',
-  ]),
+  /** Metadata fields that may hold the table name. */
+  tableFields: list(process.env.TABLE_FIELDS, ['table', 'table_name', 'tableName', 'entity', 'name']),
 
-  /** Metadata/record fields that may hold the database name. */
+  /** Metadata fields that may hold the database name. */
   dbFields: list(process.env.DB_FIELDS, ['db', 'database', 'schema_name', 'catalog']),
 
   /**
@@ -85,7 +76,9 @@ export const config = {
 export function assertConfig() {
   if (!config.apiKey) {
     throw new Error(
-      `PINECONE_API_KEY is not set. Copy .env.example to .env (${path.join(packageRoot, '.env')}) and fill it in.`,
+      process.env.VERCEL
+        ? 'PINECONE_API_KEY is not set. Add it under Project Settings → Environment Variables, then redeploy.'
+        : `PINECONE_API_KEY is not set. Add it to ${envPath}.`,
     );
   }
 }

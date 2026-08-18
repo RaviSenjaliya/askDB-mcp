@@ -8,13 +8,7 @@
     "askdb-mcp": "src/server.js"
   },
   "scripts": {
-    "setup": "node scripts/setup.js",
-    "start": "node src/server.js",
-    "doctor": "node scripts/doctor.js",
-    "smoke": "node scripts/smoke.js",
-    "start:http": "node src/http.js",
-    "smoke:http": "node scripts/smoke-http.js",
-    "dev:netlify": "netlify dev"
+    "start": "node src/server.js"
   },
   "engines": {
     "node": ">=18"

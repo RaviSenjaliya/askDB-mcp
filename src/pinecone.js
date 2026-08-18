@@ -23,10 +23,16 @@ function getClient() {
   return clientPromise;
 }
 
+async function getNamespace(namespace) {
+  const ns = namespace ?? config.namespace;
+  const client = await getClient();
+  const index = client.index({ name: config.indexName });
+  return ns ? index.namespace(ns) : index;
+}
+
 /**
- * Index metadata is fetched once and cached. `embed` is present only when the
- * index was created with integrated embedding, which decides how we search:
- * send raw text (integrated) vs. embed it ourselves first (external).
+ * Index metadata, fetched once and cached. `integrated` is what decides how we
+ * search: send raw text (integrated embedding) vs. embed it ourselves first.
  */
 export function describeIndex() {
   describePromise ??= (async () => {
@@ -36,11 +42,9 @@ export function describeIndex() {
       name: info.name,
       dimension: info.dimension,
       metric: info.metric,
-      host: info.host,
       vectorType: info.vectorType,
       integrated: Boolean(info.embed),
       embedModel: info.embed?.model,
-      fieldMap: info.embed?.fieldMap,
     };
   })().catch((error) => {
     describePromise = undefined;
@@ -49,18 +53,11 @@ export function describeIndex() {
   return describePromise;
 }
 
-async function getNamespace(namespace) {
-  const ns = namespace ?? config.namespace;
-  const client = await getClient();
-  const index = client.index({ name: config.indexName });
-  return ns ? index.namespace(ns) : index;
-}
-
 /**
  * Samples a few records to learn which metadata keys this index actually uses,
  * so filters reference real field names instead of guesses. Cached.
  */
-export function detectFields() {
+function detectFields() {
   detectPromise ??= (async () => {
     const found = new Set();
     try {
@@ -78,7 +75,6 @@ export function detectFields() {
     }
     const first = (candidates) => candidates.find((field) => found.has(field));
     return {
-      metadataKeys: [...found].sort(),
       textField: first(config.textFields) ?? config.textFields[0],
       tableField: first(config.tableFields) ?? config.tableFields[0],
       dbField: first(config.dbFields) ?? null,
@@ -138,46 +134,8 @@ const fromHit = (hit) => ({ id: hit._id, score: hit._score, fields: hit.fields ?
 const fromMatch = (match) => ({ id: match.id, score: match.score, fields: match.metadata ?? {} });
 
 /**
- * Cross-encoder rerank. Embedding similarity over whole-table DDL blobs is
- * mushy — every table full of ids and timestamps looks alike — so reranking can
- * put the right table first. Opt-in via RERANK_MODEL: on DDL it is not a
- * guaranteed win, so measure before enabling.
- */
-async function rerankHits({ query, hits, topN }) {
-  if (!config.rerankModel || hits.length < 2) return { hits, reranked: false };
-  const { textField } = await detectFields();
-
-  const documents = hits.map((hit, index) => ({
-    id: String(index),
-    text: String(hit.fields[textField] ?? hit.id).slice(0, config.rerankMaxChars),
-  }));
-
-  try {
-    const client = await getClient();
-    const response = await client.inference.rerank({
-      model: config.rerankModel,
-      query,
-      documents,
-      topN,
-      rankFields: ['text'],
-      returnDocuments: false,
-      parameters: { truncate: 'END' },
-    });
-    const ordered = (response.data ?? [])
-      .map((row) => (hits[row.index] ? { ...hits[row.index], score: row.score } : null))
-      .filter(Boolean);
-    return ordered.length
-      ? { hits: ordered, reranked: true }
-      : { hits: hits.slice(0, topN), reranked: false };
-  } catch {
-    // Reranking is an enhancement; never let it fail the whole lookup.
-    return { hits: hits.slice(0, topN), reranked: false };
-  }
-}
-
-/**
  * Semantic search over the schema index.
- * @returns {Promise<{hits: Array<{id: string, score: number, fields: object}>, mode: string, filter?: object}>}
+ * @returns {Promise<{hits: Array<{id: string, score: number, fields: object}>, mode: string}>}
  */
 export async function searchSchema({ query, topK, tables, database, namespace }) {
   const [index, ns, filter] = await Promise.all([
@@ -186,31 +144,21 @@ export async function searchSchema({ query, topK, tables, database, namespace })
     buildFilter({ tables, database }),
   ]);
 
-  // Over-fetch when reranking, so the reranker has candidates to reorder.
-  const fetchK = config.rerankModel ? Math.min(topK * config.rerankOverfetch, 200) : topK;
-
-  let raw;
-  let mode;
   if (index.integrated) {
     const response = await ns.searchRecords({
-      query: { topK: fetchK, inputs: { text: query }, ...(filter ? { filter } : {}) },
+      query: { topK, inputs: { text: query }, ...(filter ? { filter } : {}) },
     });
-    raw = (response.result?.hits ?? []).map(fromHit);
-    mode = 'integrated';
-  } else {
-    const vector = await embedQuery(query, index.dimension);
-    const response = await ns.query({
-      vector,
-      topK: fetchK,
-      includeMetadata: true,
-      ...(filter ? { filter } : {}),
-    });
-    raw = (response.matches ?? []).map(fromMatch);
-    mode = `embed:${config.embedModel}`;
+    return { hits: (response.result?.hits ?? []).map(fromHit), mode: 'integrated' };
   }
 
-  const { hits, reranked } = await rerankHits({ query, hits: raw, topN: topK });
-  return { hits, mode: reranked ? `${mode}+rerank:${config.rerankModel}` : mode, filter };
+  const vector = await embedQuery(query, index.dimension);
+  const response = await ns.query({
+    vector,
+    topK,
+    includeMetadata: true,
+    ...(filter ? { filter } : {}),
+  });
+  return { hits: (response.matches ?? []).map(fromMatch), mode: `embed:${config.embedModel}` };
 }
 
 /**
@@ -229,11 +177,7 @@ export async function fetchTable(table, { database, namespace } = {}) {
       const records = Object.values(response.records ?? {});
       if (records.length) {
         return {
-          hits: records.map((record) => ({
-            id: record.id,
-            score: 1,
-            fields: record.metadata ?? {},
-          })),
+          hits: records.map((record) => ({ id: record.id, score: 1, fields: record.metadata ?? {} })),
           matchedBy: 'exact-metadata',
         };
       }
@@ -291,7 +235,10 @@ export async function scanTables({ database, namespace } = {}) {
 
   return {
     databases: [...byDatabase.entries()]
-      .map(([db, tables]) => ({ database: db, tables: [...tables].sort((a, b) => a.localeCompare(b)) }))
+      .map(([db, tables]) => ({
+        database: db,
+        tables: [...tables].sort((a, b) => a.localeCompare(b)),
+      }))
       .sort((a, b) => a.database.localeCompare(b.database)),
     metadataKeys: [...metadataKeys].sort(),
     scanned,

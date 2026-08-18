@@ -182,10 +182,7 @@ function registerTools(server) {
   );
 }
 
-/**
- * A fresh server instance per call, so the HTTP transport can run stateless
- * (one server per request) while stdio keeps a single long-lived one.
- */
+/** Builds a fresh, fully-registered server instance. */
 export function createServer() {
   const server = new McpServer(
     { name: 'askdb-mcp', version: '1.0.0' },
