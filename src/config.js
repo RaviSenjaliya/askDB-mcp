@@ -18,6 +18,16 @@ const int = (value, fallback) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const num = (value, fallback) => {
+  const parsed = Number.parseFloat(value ?? '');
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const bool = (value, fallback) => {
+  if (value === undefined || value === '') return fallback;
+  return !/^(0|false|no|off)$/i.test(value.trim());
+};
+
 const list = (value, fallback) =>
   value
     ? value
@@ -34,6 +44,31 @@ export const config = {
 
   defaultTopK: int(process.env.TOP_K, 8),
   maxTopK: int(process.env.MAX_TOP_K, 30),
+
+  /**
+   * Output budget. Retrieval stays wide (topK) but only the strongest tables
+   * are rendered — retrieval is cheap, tokens in the answer are not.
+   */
+  maxTables: int(process.env.MAX_TABLES, 4),
+  maxCharsPerTable: int(process.env.MAX_CHARS_PER_TABLE, 1400),
+  maxResponseChars: int(process.env.MAX_RESPONSE_CHARS, 7000),
+
+  /**
+   * When retrieval cannot pick a winner, ask the user instead of dumping every
+   * candidate. The test is the size of the biggest score drop in the top
+   * results, as a fraction of the best score: below `ambiguityGap` the ranking
+   * is flat and nothing really matched. Raise it to be asked more often, lower
+   * it to be asked less. `minScore` is an extra absolute floor; 0 disables it.
+   */
+  askWhenUnsure: bool(process.env.ASK_WHEN_UNSURE, true),
+  /** Ask the user directly via MCP elicitation when the client supports it. */
+  elicit: bool(process.env.ELICIT, true),
+  ambiguityGap: num(process.env.AMBIGUITY_GAP, 0.015),
+  minScore: num(process.env.MIN_SCORE, 0),
+  maxCandidates: int(process.env.MAX_CANDIDATES, 8),
+
+  /** In-process cache TTL for searches, table fetches and the table list. 0 disables. */
+  cacheTtlMs: int(process.env.CACHE_TTL_MS, 600_000),
 
   /**
    * Only used when the index does NOT have integrated embedding. This MUST be
@@ -67,10 +102,22 @@ export const config = {
   defaultDatabase: process.env.DEFAULT_DATABASE || '',
 
   /** Purely informational: passed to the LLM so it writes the right SQL flavour. */
-  sqlDialect: process.env.SQL_DIALECT || 'ANSI SQL',
+  sqlDialect: process.env.SQL_DIALECT || 'MySQL',
 
   /** Safety cap for list_tables scans. */
   listScanLimit: int(process.env.LIST_SCAN_LIMIT, 1000),
+
+  /** Names printed by list_tables before it tells the caller to use `filter`. */
+  maxListedTables: int(process.env.MAX_LISTED_TABLES, 120),
+
+  /** Record batches fetched in parallel while scanning the index. */
+  scanConcurrency: int(process.env.SCAN_CONCURRENCY, 6),
+
+  /**
+   * How long a search will wait for a table scan that is still warming up
+   * before answering without name matching. 0 never waits.
+   */
+  inventoryWaitMs: int(process.env.INVENTORY_WAIT_MS, 3000),
 };
 
 export function assertConfig() {

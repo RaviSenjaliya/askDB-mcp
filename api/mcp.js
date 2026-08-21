@@ -10,6 +10,11 @@
  */
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { createServer } from '../src/mcp.js';
+import { warmup } from '../src/pinecone.js';
+
+// Module scope runs once per container, not per request: a warm container has
+// the Pinecone client and the table inventory ready before the first call.
+if (process.env.PINECONE_API_KEY) warmup();
 
 const rpcError = (status, code, message, headers = {}) =>
   new Response(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }), {

@@ -1,8 +1,15 @@
 import { config, assertConfig } from './config.js';
+import { cached } from './cache.js';
+
+const key = (...parts) => parts.map((part) => JSON.stringify(part ?? null)).join('|');
 
 let clientPromise;
 let describePromise;
 let detectPromise;
+/** Last unscoped table scan, kept for synchronous name matching. */
+let inventory = null;
+/** The scan currently in flight, so a query can wait a moment for it. */
+let inventoryPromise;
 /** Remembers whether this embed model accepts an explicit `dimension` param. */
 let embedAcceptsDimension = true;
 
@@ -137,7 +144,13 @@ const fromMatch = (match) => ({ id: match.id, score: match.score, fields: match.
  * Semantic search over the schema index.
  * @returns {Promise<{hits: Array<{id: string, score: number, fields: object}>, mode: string}>}
  */
-export async function searchSchema({ query, topK, tables, database, namespace }) {
+export function searchSchema({ query, topK, tables, database, namespace }) {
+  return cached(key('search', query, topK, tables, database, namespace), () =>
+    runSearch({ query, topK, tables, database, namespace }),
+  );
+}
+
+async function runSearch({ query, topK, tables, database, namespace }) {
   const [index, ns, filter] = await Promise.all([
     describeIndex(),
     getNamespace(namespace),
@@ -165,7 +178,13 @@ export async function searchSchema({ query, topK, tables, database, namespace })
  * Exact lookup by table name, optionally scoped to one database. Falls back to
  * semantic search so a slightly wrong name never returns nothing at all.
  */
-export async function fetchTable(table, { database, namespace } = {}) {
+export function fetchTable(table, { database, namespace } = {}) {
+  return cached(key('table', table, database, namespace), () =>
+    runFetchTable(table, { database, namespace }),
+  );
+}
+
+async function runFetchTable(table, { database, namespace } = {}) {
   const [ns, filter] = await Promise.all([
     getNamespace(namespace),
     buildFilter({ tables: [table], database }),
@@ -199,15 +218,72 @@ export async function fetchTable(table, { database, namespace } = {}) {
  * Walks the index to collect every table, grouped by database, plus the
  * metadata keys in use. Capped by LIST_SCAN_LIMIT.
  */
-export async function scanTables({ database, namespace } = {}) {
+export function scanTables({ database, namespace } = {}) {
+  const unscoped = !database && !namespace;
+  const promise = cached(key('scan', database, namespace), () =>
+    runScanTables({ database, namespace }),
+  ).then((scan) => {
+    if (unscoped) inventory = scan;
+    return scan;
+  });
+
+  // Tracked separately so a query can wait on a warm-up already under way.
+  if (unscoped) {
+    inventoryPromise = promise.catch(() => {
+      inventoryPromise = undefined;
+      return null;
+    });
+  }
+  return promise;
+}
+
+/** The unscoped table inventory, but only if it is already in memory. Never blocks. */
+export const peekInventory = () => inventory;
+
+/**
+ * The inventory, waiting at most `ms` for a warm-up already in flight, then
+ * giving up and resolving null. Waiting a beat for the right table beats
+ * answering the first question of a session with a shortlist; waiting
+ * indefinitely would just move the cold start into the user's query.
+ */
+export function inventoryWithin(ms) {
+  if (inventory) return Promise.resolve(inventory);
+  if (!inventoryPromise || ms <= 0) return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), ms);
+    timer.unref?.();
+    const settle = (value) => {
+      clearTimeout(timer);
+      resolve(value);
+    };
+    inventoryPromise.then(settle, () => settle(null));
+  });
+}
+
+/**
+ * Fire-and-forget priming, called once at startup. The Pinecone SDK import
+ * costs ~6s and the full table scan ~19s; paying that in the background means
+ * the first real question does not. Nothing awaits it and nothing depends on
+ * it — every consumer falls back to working without it.
+ */
+export function warmup() {
+  const note = (label) => (error) =>
+    console.error(`[askdb-mcp] warmup ${label}: ${error?.message ?? error}`);
+  describeIndex().catch(note('describeIndex'));
+  scanTables({}).catch(note('scanTables'));
+}
+
+async function runScanTables({ database, namespace } = {}) {
   const [ns, { tableField, dbField }] = await Promise.all([getNamespace(namespace), detectFields()]);
   const wanted = database ?? config.defaultDatabase;
 
-  const byDatabase = new Map();
-  const metadataKeys = new Set();
-  let scanned = 0;
+  // Listing ids is cheap (no metadata comes back); fetching the records is not.
+  // So collect every id first, then fetch the batches concurrently — done
+  // sequentially, a 466-record index took ~19s.
+  const batches = [];
   let paginationToken;
-
+  let listed = 0;
   do {
     const page = await ns.listPaginated({
       limit: 100,
@@ -215,23 +291,87 @@ export async function scanTables({ database, namespace } = {}) {
     });
     const ids = (page.vectors ?? []).map((vector) => vector.id).filter(Boolean);
     if (!ids.length) break;
+    batches.push(ids);
+    listed += ids.length;
+    paginationToken = page.pagination?.next;
+  } while (paginationToken && listed < config.listScanLimit);
 
-    const fetched = await ns.fetch({ ids });
-    for (const record of Object.values(fetched.records ?? {})) {
+  const byDatabase = new Map();
+  const metadataKeys = new Set();
+  let scanned = 0;
+
+  const add = (db, table) => {
+    if (wanted && String(db).toLowerCase() !== wanted.toLowerCase()) return;
+    if (!byDatabase.has(db)) byDatabase.set(db, new Set());
+    byDatabase.get(db).add(table);
+  };
+
+  // Fetch one batch first. If every id in it is exactly `database.table`, the
+  // remaining ids can be read directly and the other batches never fetched —
+  // on a ~486-table index that is ~386 records of DDL left on the wire.
+  const sample = batches.length ? await ns.fetch({ ids: batches[0] }) : { records: {} };
+  const sampled = Object.values(sample.records ?? {});
+  for (const record of sampled) {
+    for (const key of Object.keys(record.metadata ?? {})) metadataKeys.add(key);
+  }
+
+  const split = (id) => {
+    const dot = id.indexOf('.');
+    return dot > 0 ? { db: id.slice(0, dot), table: id.slice(dot + 1) } : null;
+  };
+  const idsAreQualified =
+    sampled.length > 0 &&
+    Boolean(dbField) &&
+    sampled.every((record) => {
+      const parts = split(record.id);
+      const metadata = record.metadata ?? {};
+      return (
+        parts && parts.db === String(metadata[dbField]) && parts.table === String(metadata[tableField])
+      );
+    });
+
+  const consume = (records) => {
+    for (const record of records) {
       scanned += 1;
       const metadata = record.metadata ?? {};
-      for (const key of Object.keys(metadata)) metadataKeys.add(key);
-
       const db = (dbField && metadata[dbField]) || '(unspecified)';
-      if (wanted && String(db).toLowerCase() !== wanted.toLowerCase()) continue;
-
       const table = metadata[tableField];
-      const label = typeof table === 'string' && table.trim() ? table.trim() : record.id;
-      if (!byDatabase.has(db)) byDatabase.set(db, new Set());
-      byDatabase.get(db).add(label);
+      add(db, typeof table === 'string' && table.trim() ? table.trim() : record.id);
     }
-    paginationToken = page.pagination?.next;
-  } while (paginationToken && scanned < config.listScanLimit);
+  };
+
+  consume(sampled);
+
+  // Batches whose ids all parse are read directly; anything with an id that
+  // does not follow the convention is still fetched, so a mixed index cannot
+  // end up with names guessed out of a malformed id.
+  const remaining = batches.slice(1);
+  const toFetch = idsAreQualified ? [] : remaining;
+  if (idsAreQualified) {
+    for (const ids of remaining) {
+      if (!ids.every((id) => split(id))) {
+        toFetch.push(ids);
+        continue;
+      }
+      for (const id of ids) {
+        scanned += 1;
+        const { db, table } = split(id);
+        add(db, table);
+      }
+    }
+  }
+
+  for (let index = 0; index < toFetch.length; index += config.scanConcurrency) {
+    const slice = toFetch.slice(index, index + config.scanConcurrency);
+    const pages = await Promise.all(slice.map((ids) => ns.fetch({ ids })));
+    for (const page of pages) {
+      const records = Object.values(page.records ?? {});
+      for (const record of records) {
+        for (const key of Object.keys(record.metadata ?? {})) metadataKeys.add(key);
+      }
+      consume(records);
+    }
+  }
 
   return {
     databases: [...byDatabase.entries()]
